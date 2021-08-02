@@ -36,6 +36,7 @@ extern crate rustc_demangle;
 
 use std::borrow::Cow;
 use std::boxed::Box;
+use std::collections::HashMap;
 #[cfg(feature = "object")]
 use std::rc::Rc;
 use std::string::{String, ToString};
@@ -272,6 +273,31 @@ impl<R: gimli::Reader> Context<R> {
             }
         }
         None
+    }
+
+    /// Find an address for each substatement in the `Location`.
+    /// This function returns a hashmap where a key is a column number of each statement
+    /// and a value is an address of an instruction from that statement.
+    /// If the `Location` specifies a column number, the hashmap will only contain one value.
+    pub fn find_addresses(
+        &self,
+        location: &Location,
+    ) -> Result<HashMap<Option<NonZeroU32>, u64>, Error> {
+        // fixme the address for a substatement is currently chosen naively
+        let mut addr_list = HashMap::new();
+
+        // for each unit individually, check if it contain the location.
+        for unit in &self.dwarf.units {
+            if let Some(line) = unit.parse_lines(self.dwarf())? {
+                // if the unit contains the location, add the address
+                // list link to the location in this unit to the total.
+                if line.files.contains(&location.file.to_string()) {
+                    let unit_addr_list = unit.find_addresses(&location, self.dwarf())?;
+                    addr_list.extend(&mut unit_addr_list.into_iter())
+                }
+            }
+        }
+        Ok(addr_list)
     }
 
     /// Find the source file and line corresponding to the given virtual memory address.
@@ -634,6 +660,24 @@ impl<R: gimli::Reader> ResUnit<R> {
             .as_ref()
             .map_err(Error::clone)?
             .parse_inlined_functions(&self.dw_unit, dwarf)
+    }
+
+    fn find_addresses(
+        &self,
+        target: &Location,
+        dwarf: &gimli::Dwarf<R>,
+    ) -> Result<HashMap<Option<NonZeroU32>, u64>, Error> {
+        let mut addr_list = HashMap::new();
+        // iterate ever each location in the unit
+        if let Some(loc_iter) = LocationRangeUnitIter::new(self, dwarf, 0, u64::MAX)? {
+            for (addr, _, location) in loc_iter {
+                // if the target location include the location, add the addr to the list.
+                if target.contain(&location) {
+                    addr_list.insert(location.column, addr);
+                }
+            }
+        }
+        Ok(addr_list)
     }
 
     fn find_location(
