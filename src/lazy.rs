@@ -1,4 +1,4 @@
-use core::cell::UnsafeCell;
+use std::cell::UnsafeCell;
 
 pub struct LazyCell<T> {
     contents: UnsafeCell<Option<T>>,

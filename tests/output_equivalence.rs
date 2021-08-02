@@ -136,6 +136,7 @@ fn make_tests() -> Vec<TestDescAndFn> {
         .collect()
 }
 
+// todo adapt test to new semantic
 fn main() {
     if !cfg!(target_os = "linux") {
         return;

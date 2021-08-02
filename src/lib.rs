@@ -23,11 +23,6 @@
 //! which is parsed using [`gimli`](https://github.com/gimli-rs/gimli).  The example CLI
 //! wrapper also uses symbol table information provided by the `object` crate.
 #![deny(missing_docs)]
-#![no_std]
-
-#[allow(unused_imports)]
-#[macro_use]
-extern crate alloc;
 
 #[cfg(feature = "cpp_demangle")]
 extern crate cpp_demangle;
@@ -39,19 +34,20 @@ pub extern crate object;
 #[cfg(feature = "rustc-demangle")]
 extern crate rustc_demangle;
 
-use alloc::borrow::Cow;
-use alloc::boxed::Box;
+use std::borrow::Cow;
+use std::boxed::Box;
+use std::collections::HashMap;
 #[cfg(feature = "object")]
-use alloc::rc::Rc;
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use std::rc::Rc;
+use std::string::{String, ToString};
+use std::sync::Arc;
+use std::vec::Vec;
 
-use core::cmp::{self, Ordering};
-use core::iter;
-use core::mem;
-use core::num::NonZeroU64;
-use core::u64;
+use std::cmp::{self, Ordering};
+use std::iter;
+use std::mem;
+use std::num::{NonZeroU32, NonZeroU64};
+use std::u64;
 
 use crate::function::{Function, Functions, InlinedFunction};
 use crate::lazy::LazyCell;
@@ -277,6 +273,31 @@ impl<R: gimli::Reader> Context<R> {
             }
         }
         None
+    }
+
+    /// Find an address for each substatement in the `Location`.
+    /// This function returns a hashmap where a key is a column number of each statement
+    /// and a value is an address of an instruction from that statement.
+    /// If the `Location` specifies a column number, the hashmap will only contain one value.
+    pub fn find_addresses(
+        &self,
+        location: &Location,
+    ) -> Result<HashMap<Option<NonZeroU32>, u64>, Error> {
+        // fixme the address for a substatement is currently chosen naively
+        let mut addr_list = HashMap::new();
+
+        // for each unit individually, check if it contain the location.
+        for unit in &self.dwarf.units {
+            if let Some(line) = unit.parse_lines(self.dwarf())? {
+                // if the unit contains the location, add the address
+                // list link to the location in this unit to the total.
+                if line.files.contains(&location.file.to_string()) {
+                    let unit_addr_list = unit.find_addresses(&location, self.dwarf())?;
+                    addr_list.extend(&mut unit_addr_list.into_iter())
+                }
+            }
+        }
+        Ok(addr_list)
     }
 
     /// Find the source file and line corresponding to the given virtual memory address.
@@ -641,6 +662,24 @@ impl<R: gimli::Reader> ResUnit<R> {
             .parse_inlined_functions(&self.dw_unit, dwarf)
     }
 
+    fn find_addresses(
+        &self,
+        target: &Location,
+        dwarf: &gimli::Dwarf<R>,
+    ) -> Result<HashMap<Option<NonZeroU32>, u64>, Error> {
+        let mut addr_list = HashMap::new();
+        // iterate ever each location in the unit
+        if let Some(loc_iter) = LocationRangeUnitIter::new(self, dwarf, 0, u64::MAX)? {
+            for (addr, _, location) in loc_iter {
+                // if the target location include the location, add the addr to the list.
+                if target.contain(&location) {
+                    addr_list.insert(location.column, addr);
+                }
+            }
+        }
+        Ok(addr_list)
+    }
+
     fn find_location(
         &self,
         probe: u64,
@@ -894,14 +933,16 @@ impl<'ctx> Iterator for LocationRangeUnitIter<'ctx> {
                     let item = (
                         row.address,
                         nextaddr - row.address,
-                        Location {
-                            file,
-                            line: if row.line != 0 { Some(row.line) } else { None },
-                            column: if row.column != 0 {
-                                Some(row.column)
+                        if let Some(file) = file {
+                            if let Some(location) = Location::new(file, row.line, row.column) {
+                                location
                             } else {
-                                None
-                            },
+                                self.row_idx += 1;
+                                continue;
+                            }
+                        } else {
+                            self.row_idx += 1;
+                            continue;
                         },
                     );
                     self.row_idx += 1;
@@ -1056,25 +1097,19 @@ where
             }
         };
 
-        let mut next = Location {
-            file: None,
-            line: if func.call_line != 0 {
-                Some(func.call_line)
+        // if the parsed line info is empty, no Location can be produce.
+        let next = if let Some(lines) = frames.unit.parse_lines(frames.sections)? {
+            // if the file number of func is not mapped to a path in the line info, it is not valid.
+            if let Some(file) = lines.files.get(func.call_file as usize) {
+                Location::new(file, func.call_line, func.call_column)
             } else {
                 None
-            },
-            column: if func.call_column != 0 {
-                Some(func.call_column)
-            } else {
-                None
-            },
-        };
-        if func.call_file != 0 {
-            if let Some(lines) = frames.unit.parse_lines(frames.sections)? {
-                next.file = lines.files.get(func.call_file as usize).map(String::as_str);
             }
-        }
-        frames.next = Some(next);
+        } else {
+            None
+        };
+
+        frames.next = next;
 
         Ok(Some(Frame {
             dw_die_offset: Some(func.dw_die_offset),
@@ -1172,14 +1207,46 @@ pub fn demangle_auto(name: Cow<str>, language: Option<gimli::DwLang>) -> Cow<str
     .unwrap_or(name)
 }
 
-/// A source location.
+/// This type represent a source location were you might went to place a breakpoint.
+/// The line number and the column number start at 1 not 0. This is consistent with the way
+/// most editor work.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Location<'a> {
-    /// The file name.
-    pub file: Option<&'a str>,
-    /// The line number.
-    pub line: Option<u32>,
-    /// The column number.
-    pub column: Option<u32>,
+    /// The path to the source file.
+    pub file: &'a str,
+    /// The line number
+    pub line: NonZeroU32,
+    /// The column number
+    pub column: Option<NonZeroU32>,
+}
+
+impl<'a> Location<'a> {
+    fn new(file: &'a str, line: u32, column: u32) -> Option<Location<'a>> {
+        // if the call line is zero, it mean that the instruction can not be attributed to any line and thous is not a valid location.
+        if let Some(line) = NonZeroU32::new(line) {
+            // if the call column is zero, it mean that the instruction is attributed to the whole line.
+            let column = NonZeroU32::new(column);
+            Some(Location { file, line, column })
+        } else {
+            None
+        }
+    }
+
+    /// Return true if `self` and `other` are equal or if `self` is a superset of `other`
+    pub fn contain(&self, other: &Self) -> bool {
+        // if the tow location have different path or line number, they are not equal nor do they overlap
+        if self.file == other.file && self.line == other.line {
+            // if self do not specify a column number that it is superset of supper
+            if self.column.is_some() {
+                // if self do specify a column number it must be equal to the other column number
+                self.column == other.column
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
