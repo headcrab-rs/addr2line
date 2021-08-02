@@ -23,11 +23,6 @@
 //! which is parsed using [`gimli`](https://github.com/gimli-rs/gimli).  The example CLI
 //! wrapper also uses symbol table information provided by the `object` crate.
 #![deny(missing_docs)]
-#![no_std]
-
-#[allow(unused_imports)]
-#[macro_use]
-extern crate alloc;
 
 #[cfg(feature = "cpp_demangle")]
 extern crate cpp_demangle;
@@ -39,19 +34,19 @@ pub extern crate object;
 #[cfg(feature = "rustc-demangle")]
 extern crate rustc_demangle;
 
-use alloc::borrow::Cow;
-use alloc::boxed::Box;
+use std::borrow::Cow;
+use std::boxed::Box;
 #[cfg(feature = "object")]
-use alloc::rc::Rc;
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use std::rc::Rc;
+use std::string::{String, ToString};
+use std::sync::Arc;
+use std::vec::Vec;
 
-use core::cmp::{self, Ordering};
-use core::iter;
-use core::mem;
-use core::num::NonZeroU64;
-use core::u64;
+use std::cmp::{self, Ordering};
+use std::iter;
+use std::mem;
+use std::num::NonZeroU64;
+use std::u64;
 
 use crate::function::{Function, Functions, InlinedFunction};
 use crate::lazy::LazyCell;
