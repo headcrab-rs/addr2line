@@ -1187,6 +1187,22 @@ impl<'a> Location<'a> {
             None
         }
     }
+
+    /// Return true if `self` and `other` are equal or if `self` is a superset of `other`
+    pub fn contain(&self, other: &Self) -> bool {
+        // if the tow location have different path or line number, they are not equal nor do they overlap
+        if self.file == other.file && self.line == other.line {
+            // if self do not specify a column number that it is superset of supper
+            if self.column.is_some() {
+                // if self do specify a column number it must be equal to the other column number
+                self.column == other.column
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
