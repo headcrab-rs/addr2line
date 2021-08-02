@@ -45,7 +45,7 @@ use std::vec::Vec;
 use std::cmp::{self, Ordering};
 use std::iter;
 use std::mem;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::u64;
 
 use crate::function::{Function, Functions, InlinedFunction};
@@ -889,14 +889,16 @@ impl<'ctx> Iterator for LocationRangeUnitIter<'ctx> {
                     let item = (
                         row.address,
                         nextaddr - row.address,
-                        Location {
-                            file,
-                            line: if row.line != 0 { Some(row.line) } else { None },
-                            column: if row.column != 0 {
-                                Some(row.column)
+                        if let Some(file) = file {
+                            if let Some(location) = Location::new(file, row.line, row.column) {
+                                location
                             } else {
-                                None
-                            },
+                                self.row_idx += 1;
+                                continue;
+                            }
+                        } else {
+                            self.row_idx += 1;
+                            continue;
                         },
                     );
                     self.row_idx += 1;
@@ -1051,25 +1053,19 @@ where
             }
         };
 
-        let mut next = Location {
-            file: None,
-            line: if func.call_line != 0 {
-                Some(func.call_line)
+        // if the parsed line info is empty, no Location can be produce.
+        let next = if let Some(lines) = frames.unit.parse_lines(frames.sections)? {
+            // if the file number of func is not mapped to a path in the line info, it is not valid.
+            if let Some(file) = lines.files.get(func.call_file as usize) {
+                Location::new(file, func.call_line, func.call_column)
             } else {
                 None
-            },
-            column: if func.call_column != 0 {
-                Some(func.call_column)
-            } else {
-                None
-            },
-        };
-        if func.call_file != 0 {
-            if let Some(lines) = frames.unit.parse_lines(frames.sections)? {
-                next.file = lines.files.get(func.call_file as usize).map(String::as_str);
             }
-        }
-        frames.next = Some(next);
+        } else {
+            None
+        };
+
+        frames.next = next;
 
         Ok(Some(Frame {
             dw_die_offset: Some(func.dw_die_offset),
@@ -1167,14 +1163,30 @@ pub fn demangle_auto(name: Cow<str>, language: Option<gimli::DwLang>) -> Cow<str
     .unwrap_or(name)
 }
 
-/// A source location.
+/// This type represent a source location were you might went to place a breakpoint.
+/// The line number and the column number start at 1 not 0. This is consistent with the way
+/// most editor work.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Location<'a> {
-    /// The file name.
-    pub file: Option<&'a str>,
-    /// The line number.
-    pub line: Option<u32>,
-    /// The column number.
-    pub column: Option<u32>,
+    /// The path to the source file.
+    pub file: &'a str,
+    /// The line number
+    pub line: NonZeroU32,
+    /// The column number
+    pub column: Option<NonZeroU32>,
+}
+
+impl<'a> Location<'a> {
+    fn new(file: &'a str, line: u32, column: u32) -> Option<Location<'a>> {
+        // if the call line is zero, it mean that the instruction can not be attributed to any line and thous is not a valid location.
+        if let Some(line) = NonZeroU32::new(line) {
+            // if the call column is zero, it mean that the instruction is attributed to the whole line.
+            let column = NonZeroU32::new(column);
+            Some(Location { file, line, column })
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
